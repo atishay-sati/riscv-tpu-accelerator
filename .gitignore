@@ -1,0 +1,27 @@
+# Vivado generated files
+.Xil/
+*.jou
+*.log
+*.str
+*.wdb
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+
+# Simulation outputs
+xsim.dir/
+webtalk*.jou
+webtalk*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Operating system
+.DS_Store
+Thumbs.db
