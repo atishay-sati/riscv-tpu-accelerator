@@ -25,6 +25,11 @@ module tpu_top #(
     parameter INPUT_PIXELS_FILE =
         "mem_files/dense_layer_test/input_pixels.mem",
 
+    // Set to 1 for the original file-based simulation.
+    // Set to 0 when an external interface (such as UART)
+    // supplies the 784 image pixels at runtime.
+    parameter bit LOAD_INPUT_FROM_FILE = 1'b1,
+
     parameter OUTPUT_WEIGHTS_FILE =
         "mem_files/output_layer_test/output_weights.mem",
 
@@ -42,15 +47,30 @@ module tpu_top #(
     input  logic reset,
     input  logic start,
 
-    // Final predicted class: 0 through 31
+    // --------------------------------------------------------
+    // EXTERNAL INPUT IMAGE WRITE INTERFACE
+    // --------------------------------------------------------
+
+    // Assert for one clock cycle to write one pixel into
+    // input_memory. The UART controller will drive these.
+    input  logic        input_write_enable,
+
+    // Address of the pixel being written: 0 through 783.
+    input  logic [9:0]  input_write_address,
+
+    // Unsigned 8-bit pixel value being written.
+    input  logic [7:0]  input_write_data,
+
+    // Final predicted class: 0 through 31.
     output logic [4:0] predicted_class,
 
-    // High while the TPU is processing an image
+    // High while the TPU is processing an image.
     output logic busy,
 
-    // High for one cycle when inference is complete
+    // High for one cycle when inference is complete.
     output logic done
 );
+
 
     // ========================================================
     // NETWORK CONFIGURATION
@@ -86,37 +106,31 @@ module tpu_top #(
     // SHARED SYSTOLIC ARRAY INTERFACE
     // ========================================================
 
-    // Each layer has its own tile request signal.
     logic hidden_tile_start;
     logic output_tile_start;
 
-    // The shared tile engine has one start/done interface.
     logic shared_tile_start;
     logic shared_tile_done;
     logic shared_tile_busy;
 
-    // Tile data produced by the hidden layer controller.
     logic signed [DATA_WIDTH-1:0]
         hidden_weight_tile [0:7][0:7];
 
     logic [DATA_WIDTH-1:0]
         hidden_activation_tile [0:7];
 
-    // Tile data produced by the output layer controller.
     logic signed [DATA_WIDTH-1:0]
         output_weight_tile [0:7][0:7];
 
     logic [DATA_WIDTH-1:0]
         output_activation_tile [0:7];
 
-    // Selected tile data sent into the shared engine.
     logic signed [DATA_WIDTH-1:0]
         shared_weight_tile [0:7][0:7];
 
     logic [DATA_WIDTH-1:0]
         shared_activation_tile [0:7];
 
-    // Partial sums returned by the shared engine.
     logic signed [ACC_WIDTH+2:0]
         shared_partial_sums [0:7];
 
@@ -157,6 +171,7 @@ module tpu_top #(
     // FINAL OUTPUT SCORE MEMORY
     // ========================================================
 
+    // The output layer writes 32 signed INT8 class scores here.
     logic signed [7:0] output_scores [0:31];
 
     // ========================================================
@@ -226,12 +241,29 @@ module tpu_top #(
     logic output_busy;
 
     // ========================================================
-    // ARGMAX SIGNALS
+    // SEQUENTIAL ARGMAX SIGNALS
     // ========================================================
 
-    integer argmax_index;
-    integer argmax_score;
-    integer argmax_loop;
+    // Selects which output score is currently being examined.
+    // Five bits address classes 0 through 31.
+    logic [4:0] argmax_counter;
+
+    // Highest score found so far.
+    // Nine bits allow initialization to -129, below the
+    // minimum signed INT8 score of -128.
+    logic signed [8:0] argmax_best_score;
+
+    // Class index corresponding to the best score.
+    logic [4:0] argmax_best_index;
+
+    // Current output score, sign-extended from 8 to 9 bits.
+    logic signed [8:0] argmax_current_score;
+
+    // Select one score using the current counter value.
+    assign argmax_current_score = {
+        output_scores[argmax_counter][7],
+        output_scores[argmax_counter]
+    };
 
     // ========================================================
     // MEMORY INITIALIZATION
@@ -248,7 +280,16 @@ module tpu_top #(
         $readmemh(HIDDEN_MULTIPLIERS_FILE, hidden_multiplier_memory);
         $readmemh(HIDDEN_SHIFTS_FILE, hidden_shift_memory);
 
-        $readmemh(INPUT_PIXELS_FILE, input_memory);
+        // Preserve the original input-file workflow for the
+        // existing TPU verification testbench. For UART-based
+        // deployment, set LOAD_INPUT_FROM_FILE to 0 instead.
+        if (LOAD_INPUT_FROM_FILE) begin
+            $readmemh(INPUT_PIXELS_FILE, input_memory);
+            $display("Input image loaded from: %s", INPUT_PIXELS_FILE);
+        end
+        else begin
+            $display("Input image will be supplied externally.");
+        end
 
         $readmemh(OUTPUT_WEIGHTS_FILE, output_weight_memory);
         $readmemh(OUTPUT_BIASES_FILE, output_bias_memory);
@@ -280,14 +321,10 @@ module tpu_top #(
         hidden_tile_start | output_tile_start;
 
     // Select the active layer's tile data.
-    //
     // The top-level FSM stays in WAIT_HIDDEN while the hidden
     // layer uses the engine, and WAIT_OUTPUT while the output
-    // layer uses it. The selected inputs therefore remain
-    // stable throughout each tile operation.
-
-    integer mux_row;
-    integer mux_col;
+    // layer uses it. The selected inputs remain stable during
+    // each tile operation.
 
     always_comb begin
 
@@ -308,9 +345,6 @@ module tpu_top #(
     // ========================================================
     // ONE SHARED DENSE TILE CONTROLLER
     // ========================================================
-
-    // Both dense layers use this same tile controller and
-    // therefore the same physical 8x8 systolic array.
 
     dense_tile_controller #(
         .DATA_WIDTH(DATA_WIDTH),
@@ -381,7 +415,6 @@ module tpu_top #(
         .busy(hidden_busy),
         .done(hidden_done),
 
-        // Shared tile engine interface.
         .tile_start(hidden_tile_start),
         .shared_weight_tile(hidden_weight_tile),
         .shared_activation_tile(hidden_activation_tile),
@@ -440,7 +473,6 @@ module tpu_top #(
         .busy(output_busy),
         .done(output_done),
 
-        // Shared tile engine interface.
         .tile_start(output_tile_start),
         .shared_weight_tile(output_weight_tile),
         .shared_activation_tile(output_activation_tile),
@@ -454,6 +486,22 @@ module tpu_top #(
     // ========================================================
 
     always_ff @(posedge clk) begin
+
+        // ----------------------------------------------------
+        // EXTERNAL INPUT IMAGE WRITES
+        // ----------------------------------------------------
+
+        // The UART controller writes one pixel per received
+        // byte. Only accept writes while the TPU is idle, so
+        // the input image cannot change during inference.
+        if (input_write_enable &&
+            (input_write_address < INPUT_FEATURES) &&
+            (state == IDLE)) begin
+
+
+             input_memory[input_write_address] <= input_write_data;
+
+        end
 
         // ----------------------------------------------------
         // HIDDEN LAYER MEMORY READS
@@ -530,39 +578,23 @@ module tpu_top #(
     end
 
     // ========================================================
-    // ARGMAX CALCULATION
-    // ========================================================
-
-    always_comb begin
-
-        argmax_index = 0;
-        argmax_score = -129;
-
-        for (argmax_loop = 0;
-             argmax_loop < OUTPUT_CLASSES;
-             argmax_loop = argmax_loop + 1) begin
-
-            if ($signed(output_scores[argmax_loop]) > argmax_score) begin
-
-                argmax_score = $signed(output_scores[argmax_loop]);
-                argmax_index = argmax_loop;
-
-            end
-
-        end
-
-    end
-
-    // ========================================================
-    // TOP-LEVEL CONTROL FSM
+    // TOP-LEVEL CONTROL FSM WITH SEQUENTIAL ARGMAX
     // ========================================================
 
     always_ff @(posedge clk) begin
 
         if (reset) begin
 
+            // Return the TPU to its idle state.
             state <= IDLE;
+
+            // Clear the previous prediction.
             predicted_class <= 5'd0;
+
+            // Reset argmax tracking registers.
+            argmax_counter <= 5'd0;
+            argmax_best_score <= -9'sd129;
+            argmax_best_index <= 5'd0;
 
         end
 
@@ -570,12 +602,20 @@ module tpu_top #(
 
             case (state)
 
+                // ------------------------------------------------
+                // IDLE
+                // ------------------------------------------------
+
                 IDLE: begin
 
                     if (start)
                         state <= START_HIDDEN;
 
                 end
+
+                // ------------------------------------------------
+                // HIDDEN LAYER
+                // ------------------------------------------------
 
                 START_HIDDEN: begin
 
@@ -590,6 +630,10 @@ module tpu_top #(
 
                 end
 
+                // ------------------------------------------------
+                // OUTPUT LAYER
+                // ------------------------------------------------
+
                 START_OUTPUT: begin
 
                     state <= WAIT_OUTPUT;
@@ -598,23 +642,80 @@ module tpu_top #(
 
                 WAIT_OUTPUT: begin
 
-                    if (output_done)
+                    if (output_done) begin
+
+                        // Prepare to scan all 32 output scores.
+                        argmax_counter <= 5'd0;
+
+                        // Initialize below the minimum possible
+                        // signed INT8 output score.
+                        argmax_best_score <= -9'sd129;
+
+                        argmax_best_index <= 5'd0;
+
                         state <= FIND_MAX;
 
+                    end
+
                 end
+
+                // ------------------------------------------------
+                // SEQUENTIAL ARGMAX
+                // ------------------------------------------------
 
                 FIND_MAX: begin
 
-                    predicted_class <= argmax_index[4:0];
-                    state <= FINISHED;
+                    // Compare the current score against the
+                    // highest score found so far.
+                    //
+                    // Strict greater-than preserves the original
+                    // behavior: ties select the first class.
+
+                    if (argmax_current_score > argmax_best_score) begin
+
+                        argmax_best_score <= argmax_current_score;
+                        argmax_best_index <= argmax_counter;
+
+                    end
+
+                    // Check whether class 31 is the final score.
+                    if (argmax_counter == 5'd31) begin
+
+                        // Handle class 31 winning in this same cycle.
+                        // Nonblocking assignments mean best_index
+                        // would otherwise still contain its old value.
+                        if (argmax_current_score > argmax_best_score)
+                            predicted_class <= argmax_counter;
+
+                        else
+                            predicted_class <= argmax_best_index;
+
+                        state <= FINISHED;
+
+                    end
+
+                    else begin
+
+                        // Advance to the next class.
+                        argmax_counter <= argmax_counter + 1'b1;
+
+                    end
 
                 end
+
+                // ------------------------------------------------
+                // FINISHED
+                // ------------------------------------------------
 
                 FINISHED: begin
 
                     state <= IDLE;
 
                 end
+
+                // ------------------------------------------------
+                // DEFAULT
+                // ------------------------------------------------
 
                 default: begin
 
@@ -632,9 +733,10 @@ module tpu_top #(
     // TOP-LEVEL STATUS SIGNALS
     // ========================================================
 
+    // done is asserted for one clock cycle while in FINISHED.
     assign done = (state == FINISHED);
 
+    // busy is high during inference and argmax processing.
     assign busy = (state != IDLE) && (state != FINISHED);
 
 endmodule
-

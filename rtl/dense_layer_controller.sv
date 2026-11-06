@@ -1,3 +1,4 @@
+
 `timescale 1ns / 1ps
 
 module dense_layer_controller #(
@@ -71,7 +72,6 @@ module dense_layer_controller #(
     input logic signed [ACC_WIDTH+2:0]
         shared_partial_sums [0:7],
 
-    // Completion signal from the shared tile engine.
     input logic shared_tile_done
 );
 
@@ -79,24 +79,29 @@ module dense_layer_controller #(
     // FSM states
     // --------------------------------------------------------
 
-    localparam IDLE             = 4'd0;
-    localparam LOAD_ACT_ADDR    = 4'd1;
-    localparam LOAD_ACT_WAIT    = 4'd2;
-    localparam LOAD_ACT_SAVE    = 4'd3;
-    localparam LOAD_W_ADDR      = 4'd4;
-    localparam LOAD_W_WAIT      = 4'd5;
-    localparam LOAD_W_SAVE      = 4'd6;
-    localparam LOAD_PARAM_ADDR  = 4'd7;
-    localparam LOAD_PARAM_WAIT  = 4'd8;
-    localparam LOAD_PARAM_SAVE  = 4'd9;
-    localparam START_TILE       = 4'd10;
-    localparam WAIT_TILE        = 4'd11;
-    localparam ACCUMULATE       = 4'd12;
-    localparam REQUANTIZE       = 4'd13;
-    localparam WRITE_RESULTS    = 4'd14;
-    localparam FINISHED         = 4'd15;
+    // Five bits are required because the new
+    // ADD_BIAS_HIGH state uses state value 18.
+    localparam IDLE                = 5'd0;
+    localparam LOAD_ACT_ADDR       = 5'd1;
+    localparam LOAD_ACT_WAIT       = 5'd2;
+    localparam LOAD_ACT_SAVE       = 5'd3;
+    localparam LOAD_W_ADDR         = 5'd4;
+    localparam LOAD_W_WAIT         = 5'd5;
+    localparam LOAD_W_SAVE         = 5'd6;
+    localparam LOAD_PARAM_ADDR     = 5'd7;
+    localparam LOAD_PARAM_WAIT     = 5'd8;
+    localparam LOAD_PARAM_SAVE     = 5'd9;
+    localparam START_TILE          = 5'd10;
+    localparam WAIT_TILE           = 5'd11;
+    localparam ACCUMULATE          = 5'd12;
+    localparam REQUANTIZE          = 5'd13;
+    localparam WRITE_RESULTS       = 5'd14;
+    localparam FINISHED            = 5'd15;
+    localparam WAIT_REQUANTIZE     = 5'd16;
+    localparam START_REQUANTIZER   = 5'd17;
+    localparam ADD_BIAS_HIGH       = 5'd18;
 
-    logic [3:0] state;
+    logic [4:0] state;
 
     // --------------------------------------------------------
     // Configuration registers
@@ -141,10 +146,47 @@ module dense_layer_controller #(
     // Shared requantization datapath
     // --------------------------------------------------------
 
-    logic signed [31:0] selected_biased_accumulator;
     logic signed [31:0] selected_multiplier;
     logic signed [7:0] selected_shift;
     logic signed [7:0] selected_requantized_result;
+
+    // --------------------------------------------------------
+    // Split accumulator-plus-bias addition pipeline
+    // --------------------------------------------------------
+
+    // The original 32-bit addition required eight CARRY4
+    // blocks in one combinational path.
+    //
+    // We now perform the addition in two 16-bit stages.
+    // This reduces the length of the carry chain in each stage.
+
+    // Stores the lower 16-bit addition result.
+    // Bit 16 stores the carry into the upper half.
+    logic [16:0] bias_low_sum_reg;
+
+    // Stores the upper 16 bits of the accumulator and bias
+    // while the lower-half addition is being completed.
+    logic [15:0] accumulator_high_reg;
+    logic [15:0] bias_high_reg;
+
+    // Combinational result of the upper 16-bit addition.
+    // The saved carry from the lower addition is included.
+    logic [16:0] selected_bias_high_sum;
+
+    // Final 32-bit accumulator-plus-bias result.
+    // This is registered before entering the requantizer.
+    logic signed [31:0] biased_accumulator_reg;
+
+    // Registered quantization parameters for the selected neuron.
+    logic signed [31:0] multiplier_reg;
+    logic signed [7:0] shift_reg;
+
+    // Starts the shared requantizer.
+    // The controller pulses this for one clock cycle.
+    logic requantizer_start;
+
+    // Pulses high when the requantizer has completed.
+    logic requantizer_done;
 
     // --------------------------------------------------------
     // Forward this layer's tile data to the shared engine.
@@ -157,15 +199,21 @@ module dense_layer_controller #(
     integer tile_col;
 
     always_comb begin
+
         for (tile_row = 0; tile_row < 8; tile_row = tile_row + 1) begin
+
             shared_activation_tile[tile_row] =
                 activation_tile[tile_row];
 
             for (tile_col = 0; tile_col < 8; tile_col = tile_col + 1) begin
+
                 shared_weight_tile[tile_row][tile_col] =
                     weight_tile[tile_row][tile_col];
+
             end
+
         end
+
     end
 
     // --------------------------------------------------------
@@ -173,26 +221,71 @@ module dense_layer_controller #(
     // --------------------------------------------------------
 
     always_comb begin
-        selected_biased_accumulator =
-            accumulators[requantize_count] +
-            bias_tile[requantize_count];
 
         selected_multiplier =
             multiplier_tile[requantize_count];
 
         selected_shift =
             shift_tile[requantize_count];
+
     end
 
-    // One requantizer shared by all eight neurons.
+    // --------------------------------------------------------
+    // Calculate the upper half of the bias addition
+    // --------------------------------------------------------
+
+    // The lower-half addition has already been completed and
+    // registered in bias_low_sum_reg.
+    //
+    // Add the upper accumulator and bias halves, including
+    // the carry generated by the lower-half addition.
+    //
+    // The 17-bit result preserves the carry out. The final
+    // 32-bit result uses only its lower 16 bits, matching
+    // normal 32-bit two's-complement wraparound behavior.
+
+    always_comb begin
+
+        selected_bias_high_sum =
+            {1'b0, accumulator_high_reg} +
+            {1'b0, bias_high_reg} +
+            bias_low_sum_reg[16];
+
+    end
+
+    // --------------------------------------------------------
+    // Shared sequential requantizer
+    // --------------------------------------------------------
+
+    // Only one requantizer is used for all eight neurons.
+    // The controller starts it, waits for done, and then
+    // stores its completed INT8 result.
+    //
+    // Its accumulator input comes from the completed
+    // two-stage accumulator-plus-bias pipeline.
     requantize_int8 shared_requantizer (
-        .accumulator(selected_biased_accumulator),
-        .multiplier(selected_multiplier),
-        .shift(selected_shift),
+
+        .clk(clk),
+        .reset(reset),
+        .start(requantizer_start),
+
+        .accumulator(biased_accumulator_reg),
+        .multiplier(multiplier_reg),
+        .shift(shift_reg),
+
         .output_zero_point(output_zero_point),
         .relu(relu_enable),
-        .result(selected_requantized_result)
+
+        .result(selected_requantized_result),
+        .done(requantizer_done)
+
     );
+
+    // --------------------------------------------------------
+    // Result storage for the eight neurons
+    // --------------------------------------------------------
+
+    logic signed [7:0] result_buffer [0:7];
 
     // --------------------------------------------------------
     // Result handshake outputs
@@ -202,13 +295,14 @@ module dense_layer_controller #(
         (state == WRITE_RESULTS) &&
         ((neuron_base + output_count) < neurons_reg);
 
-    assign result_write_enable = result_valid && result_ready;
+    assign result_write_enable =
+        result_valid && result_ready;
 
-    assign result_address = neuron_base + output_count;
-    assign result_data = result_buffer[output_count];
+    assign result_address =
+        neuron_base + output_count;
 
-    // Result storage for the eight neurons.
-    logic signed [7:0] result_buffer [0:7];
+    assign result_data =
+        result_buffer[output_count];
 
     // --------------------------------------------------------
     // Main controller
@@ -240,6 +334,19 @@ module dense_layer_controller #(
 
             tile_start <= 0;
 
+            // Reset the requantizer start pulse.
+            requantizer_start <= 0;
+
+            // Reset the requantization pipeline registers.
+            biased_accumulator_reg <= 0;
+            multiplier_reg <= 0;
+            shift_reg <= 0;
+
+            // Reset the split bias-addition pipeline.
+            bias_low_sum_reg <= 0;
+            accumulator_high_reg <= 0;
+            bias_high_reg <= 0;
+
             features_reg <= 0;
             neurons_reg <= 0;
 
@@ -267,8 +374,11 @@ module dense_layer_controller #(
 
                 activation_tile[i] <= 0;
 
-                for (j = 0; j < 8; j = j + 1)
+                for (j = 0; j < 8; j = j + 1) begin
+
                     weight_tile[i][j] <= 0;
+
+                end
 
             end
 
@@ -284,7 +394,15 @@ module dense_layer_controller #(
             multiplier_read_enable <= 0;
             shift_read_enable <= 0;
 
+            // Default requantizer start to zero.
+            // It is asserted only in the START_REQUANTIZER state.
+            requantizer_start <= 0;
+
             case (state)
+
+                // ============================================
+                // IDLE
+                // ============================================
 
                 IDLE: begin
 
@@ -335,7 +453,9 @@ module dense_layer_controller #(
                 end
 
                 LOAD_PARAM_WAIT: begin
+
                     state <= LOAD_PARAM_SAVE;
+
                 end
 
                 LOAD_PARAM_SAVE: begin
@@ -358,8 +478,11 @@ module dense_layer_controller #(
 
                         load_count <= 0;
 
-                        for (i = 0; i < 8; i = i + 1)
+                        for (i = 0; i < 8; i = i + 1) begin
+
                             accumulators[i] <= 0;
+
+                        end
 
                         feature_base <= 0;
                         feature_tile_count <= 0;
@@ -389,7 +512,9 @@ module dense_layer_controller #(
                 end
 
                 LOAD_ACT_WAIT: begin
+
                     state <= LOAD_ACT_SAVE;
+
                 end
 
                 LOAD_ACT_SAVE: begin
@@ -432,7 +557,9 @@ module dense_layer_controller #(
                 end
 
                 LOAD_W_WAIT: begin
+
                     state <= LOAD_W_SAVE;
+
                 end
 
                 LOAD_W_SAVE: begin
@@ -481,8 +608,11 @@ module dense_layer_controller #(
 
                 WAIT_TILE: begin
 
-                    if (shared_tile_done)
+                    if (shared_tile_done) begin
+
                         state <= ACCUMULATE;
+
+                    end
 
                 end
 
@@ -509,6 +639,7 @@ module dense_layer_controller #(
 
                     end else begin
 
+                        // Begin requantizing neuron zero.
                         requantize_count <= 0;
                         state <= REQUANTIZE;
 
@@ -517,24 +648,102 @@ module dense_layer_controller #(
                 end
 
                 // ============================================
-                // REQUANTIZE
+                // FIRST STAGE OF BIAS ADDITION
                 // ============================================
 
                 REQUANTIZE: begin
 
-                    result_buffer[requantize_count] <=
-                        selected_requantized_result;
+                    // Add the lower 16 bits of the accumulator
+                    // and bias. Save the 17-bit result so that
+                    // the carry into bit 16 is preserved.
+                    bias_low_sum_reg <=
+                        {1'b0, accumulators[requantize_count][15:0]} +
+                        {1'b0, bias_tile[requantize_count][15:0]};
 
-                    if (requantize_count == 7) begin
+                    // Save the upper halves for the next stage.
+                    accumulator_high_reg <=
+                        accumulators[requantize_count][31:16];
 
-                        requantize_count <= 0;
-                        output_count <= 0;
+                    bias_high_reg <=
+                        bias_tile[requantize_count][31:16];
 
-                        state <= WRITE_RESULTS;
+                    // Capture this neuron's quantization parameters.
+                    multiplier_reg <= selected_multiplier;
+                    shift_reg <= selected_shift;
 
-                    end else begin
+                    // Complete the upper-half addition next.
+                    state <= ADD_BIAS_HIGH;
 
-                        requantize_count <= requantize_count + 1;
+                end
+
+                // ============================================
+                // SECOND STAGE OF BIAS ADDITION
+                // ============================================
+
+                ADD_BIAS_HIGH: begin
+
+                    // Combine the upper-half sum with the saved
+                    // lower-half result to form the complete
+                    // 32-bit accumulator-plus-bias value.
+                    biased_accumulator_reg <= {
+                        selected_bias_high_sum[15:0],
+                        bias_low_sum_reg[15:0]
+                    };
+
+                    // Start the requantizer after the final
+                    // 32-bit result has been registered.
+                    state <= START_REQUANTIZER;
+
+                end
+
+                // ============================================
+                // START REQUANTIZER
+                // ============================================
+
+                START_REQUANTIZER: begin
+
+                    // Pulse the requantizer start signal.
+                    // It captures the registered parameters
+                    // on the following rising clock edge.
+                    requantizer_start <= 1;
+
+                    // Wait for the requantizer to finish.
+                    state <= WAIT_REQUANTIZE;
+
+                end
+
+                // ============================================
+                // WAIT FOR REQUANTIZATION
+                // ============================================
+
+                WAIT_REQUANTIZE: begin
+
+                    // The requantizer pulses done after its
+                    // result register has been updated.
+                    if (requantizer_done) begin
+
+                        // Save the completed INT8 result for
+                        // the currently selected neuron.
+                        result_buffer[requantize_count] <=
+                            selected_requantized_result;
+
+                        if (requantize_count == 7) begin
+
+                            // All eight neurons are complete.
+                            requantize_count <= 0;
+                            output_count <= 0;
+
+                            state <= WRITE_RESULTS;
+
+                        end else begin
+
+                            // Select the next neuron.
+                            requantize_count <= requantize_count + 1;
+
+                            // Capture the next neuron's parameters.
+                            state <= REQUANTIZE;
+
+                        end
 
                     end
 
@@ -608,6 +817,10 @@ module dense_layer_controller #(
                     state <= IDLE;
 
                 end
+
+                // ============================================
+                // DEFAULT
+                // ============================================
 
                 default: begin
 
