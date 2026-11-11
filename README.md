@@ -56,7 +56,7 @@ Instead of storing all 64 weights for an 8-neuron tile in a single memory struct
 
 Each bank supplies weights for one processing element column of the systolic array.
 
-For a neuron index \(n\) and input feature index \(f\), the memory mapping is:
+For a neuron index `n` and input feature index `f`, the memory mapping is:
 
 ```text
 bank         = n % 8
@@ -114,67 +114,71 @@ This section describes the mathematical operations performed by the neural netwo
 
 A dense layer calculates the weighted sum of its input features for every output neuron.
 
-For an input vector \(x\), weight matrix \(W\), and bias vector \(b\):
+The general matrix equation is:
 
-\[
-y = Wx+b
-\]
+```text
+Y = WX + b
+```
 
-For an individual output neuron \(j\):
+For an individual output neuron:
 
-\[
-y_j = \sum_{i=0}^{N-1} W_{j,i}x_i+b_j
-\]
+```text
+y[j] = sum(W[j][i] * x[i]) + b[j]
+
+             i = 0 to N-1
+```
 
 Where:
 
-- \(N\) is the number of input features.
-- \(W_{j,i}\) is the weight connecting input \(i\) to neuron \(j\).
-- \(x_i\) is the input activation.
-- \(b_j\) is the neuron's bias.
-- \(y_j\) is the resulting accumulated value.
+- `N` is the number of input features.
+- `W[j][i]` is the weight connecting input `i` to neuron `j`.
+- `x[i]` is the input activation.
+- `b[j]` is the neuron's bias.
+- `y[j]` is the resulting accumulated value.
 
 For the current network:
 
 **Hidden layer:**
 
-\[
-H = WX+b
-\]
+```text
+H = W_hidden * X + b_hidden
 
-\[
-W \in \mathbb{R}^{128\times784}
-\]
+W_hidden: 128 x 784
+X:        784 x 1
+H:        128 x 1
+```
 
 **Output layer:**
 
-\[
-Y = VH+c
-\]
+```text
+Y = W_output * H + b_output
 
-\[
-V \in \mathbb{R}^{32\times128}
-\]
+W_output: 32 x 128
+H:        128 x 1
+Y:        32 x 1
+```
 
 The network therefore performs:
 
-\[
-784 \rightarrow 128 \rightarrow 32
-\]
+```text
+784 -> 128 -> 32
+```
 
 ### 2. Multiply-Accumulate Operation
 
 The fundamental operation inside each systolic processing element is the multiply-accumulate (MAC).
 
-\[
-ACC_{\text{next}} = ACC_{\text{current}} + A\times B
-\]
+```text
+ACC_next = ACC_current + A * B
+```
 
 For a complete dot product:
 
-\[
-ACC = \sum_{i=0}^{N-1} A_iB_i
-\]
+```text
+ACC = sum(A[i] * B[i])
+
+      i = 0 to N-1
+```
 
 Each processing element performs multiplication and accumulation as data moves through the systolic array.
 
@@ -188,45 +192,45 @@ The array processes up to eight rows and eight columns of a matrix multiplicatio
 
 For matrix multiplication:
 
-\[
-C_{M\times N}=A_{M\times K}B_{K\times N}
-\]
+```text
+C = A * B
+
+A: M x K
+B: K x N
+C: M x N
+```
 
 Each output element is:
 
-\[
-C_{i,j}=\sum_{k=0}^{K-1}A_{i,k}B_{k,j}
-\]
+```text
+C[i][j] = sum(A[i][k] * B[k][j])
+
+          k = 0 to K-1
+```
 
 Because the matrices can exceed the physical array dimensions, they are divided into smaller tiles.
 
 For an 8×8 tile:
 
-\[
-C_{\text{tile}}=A_{\text{tile}}B_{\text{tile}}
-\]
+```text
+C_tile = A_tile * B_tile
+```
 
 The complete matrix is constructed by accumulating the results of the corresponding tiles.
 
 The number of tiles along each matrix dimension is:
 
-\[
-T_M=\left\lceil\frac{M}{8}\right\rceil
-\]
+```text
+T_M = ceil(M / 8)
+T_N = ceil(N / 8)
+T_K = ceil(K / 8)
+```
 
-\[
-T_N=\left\lceil\frac{N}{8}\right\rceil
-\]
+The total number of tile combinations is:
 
-\[
-T_K=\left\lceil\frac{K}{8}\right\rceil
-\]
-
-The total number of matrix multiplication tiles is:
-
-\[
-T_{\text{total}}=T_M T_N T_K
-\]
+```text
+T_total = T_M * T_N * T_K
+```
 
 ### 4. INT8 Quantization
 
@@ -234,30 +238,30 @@ The neural network uses integer representations instead of floating-point values
 
 An affine quantization relationship maps a real-valued number to an integer:
 
-\[
-q=\operatorname{round}\left(\frac{r}{s}\right)+z
-\]
-
-Where:
-
-- \(r\) is the original real-valued number.
-- \(q\) is the quantized integer.
-- \(s\) is the quantization scale.
-- \(z\) is the zero point.
+```text
+q = round(r / s) + z
+```
 
 The reverse relationship is:
 
-\[
-r=s(q-z)
-\]
+```text
+r = s * (q - z)
+```
+
+Where:
+
+- `r` is the original real-valued number.
+- `q` is the quantized integer.
+- `s` is the quantization scale.
+- `z` is the zero point.
 
 The zero point allows real zero to be represented by an integer value that is not necessarily zero.
 
 For signed INT8:
 
-\[
--128\leq q\leq127
-\]
+```text
+-128 <= q <= 127
+```
 
 The weights and activations are represented using INT8 values, while intermediate accumulation uses wider arithmetic.
 
@@ -265,27 +269,27 @@ The weights and activations are represented using INT8 values, while intermediat
 
 For quantized activations and weights, the accumulator operates on zero-point-adjusted values.
 
-\[
-ACC_j =
-\sum_{i=0}^{N-1}
-(q_{x_i}-z_x)(q_{w_{j,i}}-z_w)+b_{q,j}
-\]
+```text
+ACC[j] = sum(
+    (q_x[i] - z_x) * (q_w[j][i] - z_w)
+) + b_q[j]
+```
 
 Where:
 
-- \(q_x\) represents quantized activations.
-- \(q_w\) represents quantized weights.
-- \(z_x\) and \(z_w\) are their respective zero points.
-- \(b_q\) is the quantized bias.
-- \(ACC_j\) is the wider integer accumulator.
+- `q_x` represents quantized activations.
+- `q_w` represents quantized weights.
+- `z_x` and `z_w` are their respective zero points.
+- `b_q` is the quantized bias.
+- `ACC[j]` is the wider integer accumulator.
 
-For the common case where weight zero point is zero:
+For the common case where the weight zero point is zero:
 
-\[
-ACC_j =
-\sum_{i=0}^{N-1}
-(q_{x_i}-z_x)q_{w_{j,i}}+b_{q,j}
-\]
+```text
+ACC[j] = sum(
+    (q_x[i] - z_x) * q_w[j][i]
+) + b_q[j]
+```
 
 The accumulator uses a wider representation because adding many INT8 multiplication results can exceed the INT8 range.
 
@@ -293,15 +297,15 @@ The accumulator uses a wider representation because adding many INT8 multiplicat
 
 The bias must use a scale compatible with the product of the activation and weight scales.
 
-\[
-s_b=s_xs_w
-\]
+```text
+s_bias = s_x * s_w
+```
 
 The quantized bias is:
 
-\[
-b_q=\operatorname{round}\left(\frac{b}{s_xs_w}\right)
-\]
+```text
+b_q = round(b / (s_x * s_w))
+```
 
 This allows the bias to be added directly to the integer accumulator.
 
@@ -311,46 +315,41 @@ After accumulation, the wider integer result must be converted back into the INT
 
 The real-valued relationship between accumulator and output is:
 
-\[
-r_y=ACC\times s_xs_w
-\]
+```text
+r_y = ACC * s_x * s_w
+```
 
 The output quantization relationship is:
 
-\[
-q_y=\operatorname{round}\left(\frac{r_y}{s_y}\right)+z_y
-\]
+```text
+q_y = round(r_y / s_y) + z_y
+```
 
 Combining the equations:
 
-\[
-q_y=
-\operatorname{round}
-\left(
-ACC\times\frac{s_xs_w}{s_y}
-\right)+z_y
-\]
+```text
+q_y = round(ACC * (s_x * s_w / s_y)) + z_y
+```
 
 The accelerator implements this conversion using an integer multiplier and a bit shift.
 
 Conceptually:
 
-\[
-q_y=
-\operatorname{RoundShift}(ACC\times M,S)+z_y
-\]
+```text
+q_y = RoundShift(ACC * M, S) + z_y
+```
 
 Where:
 
-- \(M\) is the quantized requantization multiplier.
-- \(S\) is the associated shift.
-- \(z_y\) is the output zero point.
+- `M` is the quantized requantization multiplier.
+- `S` is the associated shift.
+- `z_y` is the output zero point.
 
 The result is saturated to the signed INT8 range:
 
-\[
-q_y=\min(127,\max(-128,q_y))
-\]
+```text
+q_y = min(127, max(-128, q_y))
+```
 
 The exact multiplier encoding, rounding behavior, and shift convention are determined by the quantization parameters and the `requantize_int8.sv` implementation.
 
@@ -360,17 +359,17 @@ The hidden layer uses the Rectified Linear Unit (ReLU) activation function.
 
 In real-valued arithmetic:
 
-\[
-\operatorname{ReLU}(x)=\max(0,x)
-\]
+```text
+ReLU(x) = max(0, x)
+```
 
 For an affine-quantized output, real zero corresponds to the output zero point.
 
 Therefore, the quantized ReLU operation is conceptually:
 
-\[
-q_{\text{ReLU}}=\max(q_y,z_y)
-\]
+```text
+q_ReLU = max(q_y, z_y)
+```
 
 This preserves the correct real-valued zero threshold when the zero point is nonzero.
 
@@ -382,9 +381,11 @@ The output layer produces 32 scores, one for each class.
 
 The predicted class is the index of the largest output score:
 
-\[
-\hat{c}=\operatorname*{arg\,max}_{j\in[0,31]}Y_j
-\]
+```text
+predicted_class = argmax(Y[j])
+
+                   j = 0 to 31
+```
 
 The accelerator performs a sequential comparison to find the largest score and its corresponding class index.
 
@@ -394,26 +395,25 @@ The resulting class index is transmitted to the computer over UART.
 
 The eight independent weight banks distribute output neurons across the memory banks.
 
-For neuron \(n\):
+For neuron `n`:
 
-\[
-\operatorname{bank}(n)=n\bmod8
-\]
+```text
+bank(n) = n % 8
+```
 
 The neuron group is:
 
-\[
-\operatorname{group}(n)=\left\lfloor\frac{n}{8}\right\rfloor
-\]
+```text
+group(n) = floor(n / 8)
+```
 
 The address inside the selected bank is:
 
-\[
-\operatorname{address}(n,f)=
-\left\lfloor\frac{n}{8}\right\rfloor F+f
-\]
+```text
+bank_address(n, f) = floor(n / 8) * F + f
+```
 
-Where \(F\) is the number of input features in the layer.
+Where `F` is the number of input features in the layer.
 
 This arrangement allows eight neurons to receive their corresponding weights simultaneously for each feature index.
 
@@ -421,49 +421,47 @@ This arrangement allows eight neurons to receive their corresponding weights sim
 
 In the original sequential approach:
 
-\[
-C_{\text{weight,old}}=64\times3=192
-\]
+```text
+C_weight_old = 64 * 3
+             = 192 cycles
+```
 
 With eight-bank parallel access:
 
-\[
-C_{\text{weight,new}}=8\times3=24
-\]
+```text
+C_weight_new = 8 * 3
+             = 24 cycles
+```
 
 Activation loading remains:
 
-\[
-C_{\text{activation}}=24
-\]
+```text
+C_activation = 24 cycles
+```
 
 Total loading cycles are:
 
-\[
-C_{\text{old}}=192+24=216
-\]
+```text
+C_old = 192 + 24
+      = 216 cycles
 
-\[
-C_{\text{new}}=24+24=48
-\]
+C_new = 24 + 24
+      = 48 cycles
+```
 
 The loading-cycle reduction factor is:
 
-\[
-\text{Speedup}_{\text{loading}}=
-\frac{216}{48}=4.5
-\]
+```text
+Loading speedup = 216 / 48
+                = 4.5x
+```
 
 The percentage reduction in tile-loading cycles is:
 
-\[
-\text{Reduction}=
-\left(1-\frac{48}{216}\right)\times100
-\]
-
-\[
-\text{Reduction}\approx77.78\%
-\]
+```text
+Reduction = (1 - 48 / 216) * 100
+          = 77.78%
+```
 
 This improvement applies to tile-loading overhead, not total neural network inference latency.
 
@@ -479,37 +477,34 @@ Each transmitted byte contains:
 
 Therefore:
 
-\[
-B_{\text{per byte}}=10
-\]
+```text
+Bits per byte = 10
+```
 
-The theoretical transmission time for \(N\) bytes is:
+The theoretical transmission time for `N` bytes is:
 
-\[
-t_{\text{UART}}=\frac{10N}{R}
-\]
+```text
+t_UART = (10 * N) / R
+```
 
 Where:
 
-- \(N\) is the number of transmitted bytes.
-- \(R\) is the UART baud rate.
+- `N` is the number of transmitted bytes.
+- `R` is the UART baud rate.
 
 For the current packet:
 
-\[
-N=1+784+1=786
-\]
+```text
+N = 1 header + 784 image bytes + 1 response
+  = 786 bytes
+```
 
 At 921600 baud:
 
-\[
-t_{\text{UART}}=
-\frac{10\times786}{921600}
-\]
-
-\[
-t_{\text{UART}}\approx8.529\text{ ms}
-\]
+```text
+t_UART = (10 * 786) / 921600
+       = 8.529 ms
+```
 
 This is the theoretical serial transfer time for the complete request and response, excluding additional host and USB-UART overhead.
 
@@ -519,49 +514,40 @@ The FPGA operates with a 100 MHz clock.
 
 The clock period is:
 
-\[
-T_{\text{clock}}=\frac{1}{f_{\text{clock}}}
-\]
+```text
+T_clock = 1 / f_clock
 
-\[
-T_{\text{clock}}=\frac{1}{100\times10^6}
-=10\text{ ns}
-\]
+T_clock = 1 / 100,000,000
+        = 10 ns
+```
 
 Inference latency is calculated from the measured cycle count:
 
-\[
-t_{\text{inference}}=
-\frac{C_{\text{inference}}}{f_{\text{clock}}}
-\]
+```text
+t_inference = C_inference / f_clock
+```
 
 For the measured 134,877 cycles:
 
-\[
-t_{\text{inference}}=
-\frac{134877}{100\times10^6}
-\]
-
-\[
-t_{\text{inference}}=1.34877\text{ ms}
-\]
+```text
+t_inference = 134877 / 100,000,000
+            = 1.34877 ms
+```
 
 ### 14. CPU-to-FPGA Performance Comparison
 
 The relative speed ratio is calculated using:
 
-\[
-\text{Speed Ratio}=
-\frac{t_{\text{slower}}}{t_{\text{faster}}}
-\]
+```text
+Speed ratio = slower execution time / faster execution time
+```
 
 Using the measured CPU and FPGA inference times:
 
-\[
-\text{Speed Ratio}=
-\frac{1.34877}{0.148}
-\approx9.11
-\]
+```text
+Speed ratio = 1.34877 / 0.148
+            = 9.11
+```
 
 For this particular model and implementation, the CPU completes inference approximately 9.1 times faster than the FPGA.
 
