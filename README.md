@@ -63,7 +63,7 @@ $$
 $$
 
 $$
-\text{bank\_address} = \left\lfloor \frac{n}{8} \right\rfloor F + f
+\text{bank}_{\text{addr}} = \left\lfloor \frac{n}{8} \right\rfloor F + f
 $$
 
 Where:
@@ -378,7 +378,7 @@ The output layer produces 32 scores, one for each class.
 The predicted class is the index of the largest output score:
 
 $$
-\text{predicted\_class} = \underset{0 \le j \le 31}{\arg\max}\; Y_j
+\text{class}_{\text{pred}} = \underset{0 \le j \le 31}{\arg\max}\; Y_j
 $$
 
 The accelerator performs a sequential comparison to find the largest score and its corresponding class index.
@@ -404,7 +404,7 @@ $$
 The address inside the selected bank is:
 
 $$
-\text{bank\_address}(n, f) = \left\lfloor \frac{n}{8} \right\rfloor F + f
+\text{bank}_{\text{addr}}(n, f) = \left\lfloor \frac{n}{8} \right\rfloor F + f
 $$
 
 Where $F$ is the number of input features in the layer.
