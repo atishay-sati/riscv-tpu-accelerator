@@ -59,8 +59,8 @@ Each bank supplies weights for one processing element column of the systolic arr
 For a neuron index \(n\) and input feature index \(f\), the memory mapping is:
 
 ```text
-Bank address = n % 8
-Memory address = floor(n / 8) * F + f
+bank         = n % 8
+bank_address = floor(n / 8) * F + f
 ```
 
 Where:
@@ -105,6 +105,467 @@ The network uses INT8 quantized weights and activations. Accumulation uses wider
 Weights, biases, multipliers, and shift values are initialized using `.mem` files.
 
 These memory initialization files are incorporated into the FPGA design during synthesis.
+
+## Mathematical Foundations
+
+This section describes the mathematical operations performed by the neural network and implemented by the FPGA accelerator.
+
+### 1. Dense Layer Computation
+
+A dense layer calculates the weighted sum of its input features for every output neuron.
+
+For an input vector \(x\), weight matrix \(W\), and bias vector \(b\):
+
+\[
+y = Wx+b
+\]
+
+For an individual output neuron \(j\):
+
+\[
+y_j = \sum_{i=0}^{N-1} W_{j,i}x_i+b_j
+\]
+
+Where:
+
+- \(N\) is the number of input features.
+- \(W_{j,i}\) is the weight connecting input \(i\) to neuron \(j\).
+- \(x_i\) is the input activation.
+- \(b_j\) is the neuron's bias.
+- \(y_j\) is the resulting accumulated value.
+
+For the current network:
+
+**Hidden layer:**
+
+\[
+H = WX+b
+\]
+
+\[
+W \in \mathbb{R}^{128\times784}
+\]
+
+**Output layer:**
+
+\[
+Y = VH+c
+\]
+
+\[
+V \in \mathbb{R}^{32\times128}
+\]
+
+The network therefore performs:
+
+\[
+784 \rightarrow 128 \rightarrow 32
+\]
+
+### 2. Multiply-Accumulate Operation
+
+The fundamental operation inside each systolic processing element is the multiply-accumulate (MAC).
+
+\[
+ACC_{\text{next}} = ACC_{\text{current}} + A\times B
+\]
+
+For a complete dot product:
+
+\[
+ACC = \sum_{i=0}^{N-1} A_iB_i
+\]
+
+Each processing element performs multiplication and accumulation as data moves through the systolic array.
+
+The wider accumulator preserves intermediate precision while the input operands and weights use INT8 representation.
+
+### 3. Systolic Array Matrix Multiplication
+
+The accelerator uses an 8×8 array containing 64 processing elements.
+
+The array processes up to eight rows and eight columns of a matrix multiplication tile in parallel.
+
+For matrix multiplication:
+
+\[
+C_{M\times N}=A_{M\times K}B_{K\times N}
+\]
+
+Each output element is:
+
+\[
+C_{i,j}=\sum_{k=0}^{K-1}A_{i,k}B_{k,j}
+\]
+
+Because the matrices can exceed the physical array dimensions, they are divided into smaller tiles.
+
+For an 8×8 tile:
+
+\[
+C_{\text{tile}}=A_{\text{tile}}B_{\text{tile}}
+\]
+
+The complete matrix is constructed by accumulating the results of the corresponding tiles.
+
+The number of tiles along each matrix dimension is:
+
+\[
+T_M=\left\lceil\frac{M}{8}\right\rceil
+\]
+
+\[
+T_N=\left\lceil\frac{N}{8}\right\rceil
+\]
+
+\[
+T_K=\left\lceil\frac{K}{8}\right\rceil
+\]
+
+The total number of matrix multiplication tiles is:
+
+\[
+T_{\text{total}}=T_M T_N T_K
+\]
+
+### 4. INT8 Quantization
+
+The neural network uses integer representations instead of floating-point values to reduce hardware complexity and memory requirements.
+
+An affine quantization relationship maps a real-valued number to an integer:
+
+\[
+q=\operatorname{round}\left(\frac{r}{s}\right)+z
+\]
+
+Where:
+
+- \(r\) is the original real-valued number.
+- \(q\) is the quantized integer.
+- \(s\) is the quantization scale.
+- \(z\) is the zero point.
+
+The reverse relationship is:
+
+\[
+r=s(q-z)
+\]
+
+The zero point allows real zero to be represented by an integer value that is not necessarily zero.
+
+For signed INT8:
+
+\[
+-128\leq q\leq127
+\]
+
+The weights and activations are represented using INT8 values, while intermediate accumulation uses wider arithmetic.
+
+### 5. Quantized Multiply-Accumulate
+
+For quantized activations and weights, the accumulator operates on zero-point-adjusted values.
+
+\[
+ACC_j =
+\sum_{i=0}^{N-1}
+(q_{x_i}-z_x)(q_{w_{j,i}}-z_w)+b_{q,j}
+\]
+
+Where:
+
+- \(q_x\) represents quantized activations.
+- \(q_w\) represents quantized weights.
+- \(z_x\) and \(z_w\) are their respective zero points.
+- \(b_q\) is the quantized bias.
+- \(ACC_j\) is the wider integer accumulator.
+
+For the common case where weight zero point is zero:
+
+\[
+ACC_j =
+\sum_{i=0}^{N-1}
+(q_{x_i}-z_x)q_{w_{j,i}}+b_{q,j}
+\]
+
+The accumulator uses a wider representation because adding many INT8 multiplication results can exceed the INT8 range.
+
+### 6. Bias Quantization
+
+The bias must use a scale compatible with the product of the activation and weight scales.
+
+\[
+s_b=s_xs_w
+\]
+
+The quantized bias is:
+
+\[
+b_q=\operatorname{round}\left(\frac{b}{s_xs_w}\right)
+\]
+
+This allows the bias to be added directly to the integer accumulator.
+
+### 7. Requantization
+
+After accumulation, the wider integer result must be converted back into the INT8 representation expected by the next layer.
+
+The real-valued relationship between accumulator and output is:
+
+\[
+r_y=ACC\times s_xs_w
+\]
+
+The output quantization relationship is:
+
+\[
+q_y=\operatorname{round}\left(\frac{r_y}{s_y}\right)+z_y
+\]
+
+Combining the equations:
+
+\[
+q_y=
+\operatorname{round}
+\left(
+ACC\times\frac{s_xs_w}{s_y}
+\right)+z_y
+\]
+
+The accelerator implements this conversion using an integer multiplier and a bit shift.
+
+Conceptually:
+
+\[
+q_y=
+\operatorname{RoundShift}(ACC\times M,S)+z_y
+\]
+
+Where:
+
+- \(M\) is the quantized requantization multiplier.
+- \(S\) is the associated shift.
+- \(z_y\) is the output zero point.
+
+The result is saturated to the signed INT8 range:
+
+\[
+q_y=\min(127,\max(-128,q_y))
+\]
+
+The exact multiplier encoding, rounding behavior, and shift convention are determined by the quantization parameters and the `requantize_int8.sv` implementation.
+
+### 8. ReLU Activation
+
+The hidden layer uses the Rectified Linear Unit (ReLU) activation function.
+
+In real-valued arithmetic:
+
+\[
+\operatorname{ReLU}(x)=\max(0,x)
+\]
+
+For an affine-quantized output, real zero corresponds to the output zero point.
+
+Therefore, the quantized ReLU operation is conceptually:
+
+\[
+q_{\text{ReLU}}=\max(q_y,z_y)
+\]
+
+This preserves the correct real-valued zero threshold when the zero point is nonzero.
+
+The hidden layer applies ReLU, while the output layer does not.
+
+### 9. Argmax Classification
+
+The output layer produces 32 scores, one for each class.
+
+The predicted class is the index of the largest output score:
+
+\[
+\hat{c}=\operatorname*{arg\,max}_{j\in[0,31]}Y_j
+\]
+
+The accelerator performs a sequential comparison to find the largest score and its corresponding class index.
+
+The resulting class index is transmitted to the computer over UART.
+
+### 10. Weight Banking Address Calculation
+
+The eight independent weight banks distribute output neurons across the memory banks.
+
+For neuron \(n\):
+
+\[
+\operatorname{bank}(n)=n\bmod8
+\]
+
+The neuron group is:
+
+\[
+\operatorname{group}(n)=\left\lfloor\frac{n}{8}\right\rfloor
+\]
+
+The address inside the selected bank is:
+
+\[
+\operatorname{address}(n,f)=
+\left\lfloor\frac{n}{8}\right\rfloor F+f
+\]
+
+Where \(F\) is the number of input features in the layer.
+
+This arrangement allows eight neurons to receive their corresponding weights simultaneously for each feature index.
+
+### 11. Weight Loading Cycle Reduction
+
+In the original sequential approach:
+
+\[
+C_{\text{weight,old}}=64\times3=192
+\]
+
+With eight-bank parallel access:
+
+\[
+C_{\text{weight,new}}=8\times3=24
+\]
+
+Activation loading remains:
+
+\[
+C_{\text{activation}}=24
+\]
+
+Total loading cycles are:
+
+\[
+C_{\text{old}}=192+24=216
+\]
+
+\[
+C_{\text{new}}=24+24=48
+\]
+
+The loading-cycle reduction factor is:
+
+\[
+\text{Speedup}_{\text{loading}}=
+\frac{216}{48}=4.5
+\]
+
+The percentage reduction in tile-loading cycles is:
+
+\[
+\text{Reduction}=
+\left(1-\frac{48}{216}\right)\times100
+\]
+
+\[
+\text{Reduction}\approx77.78\%
+\]
+
+This improvement applies to tile-loading overhead, not total neural network inference latency.
+
+### 12. UART Communication Timing
+
+The UART protocol uses 8N1 serial communication.
+
+Each transmitted byte contains:
+
+- 1 start bit
+- 8 data bits
+- 1 stop bit
+
+Therefore:
+
+\[
+B_{\text{per byte}}=10
+\]
+
+The theoretical transmission time for \(N\) bytes is:
+
+\[
+t_{\text{UART}}=\frac{10N}{R}
+\]
+
+Where:
+
+- \(N\) is the number of transmitted bytes.
+- \(R\) is the UART baud rate.
+
+For the current packet:
+
+\[
+N=1+784+1=786
+\]
+
+At 921600 baud:
+
+\[
+t_{\text{UART}}=
+\frac{10\times786}{921600}
+\]
+
+\[
+t_{\text{UART}}\approx8.529\text{ ms}
+\]
+
+This is the theoretical serial transfer time for the complete request and response, excluding additional host and USB-UART overhead.
+
+### 13. FPGA Inference Latency
+
+The FPGA operates with a 100 MHz clock.
+
+The clock period is:
+
+\[
+T_{\text{clock}}=\frac{1}{f_{\text{clock}}}
+\]
+
+\[
+T_{\text{clock}}=\frac{1}{100\times10^6}
+=10\text{ ns}
+\]
+
+Inference latency is calculated from the measured cycle count:
+
+\[
+t_{\text{inference}}=
+\frac{C_{\text{inference}}}{f_{\text{clock}}}
+\]
+
+For the measured 134,877 cycles:
+
+\[
+t_{\text{inference}}=
+\frac{134877}{100\times10^6}
+\]
+
+\[
+t_{\text{inference}}=1.34877\text{ ms}
+\]
+
+### 14. CPU-to-FPGA Performance Comparison
+
+The relative speed ratio is calculated using:
+
+\[
+\text{Speed Ratio}=
+\frac{t_{\text{slower}}}{t_{\text{faster}}}
+\]
+
+Using the measured CPU and FPGA inference times:
+
+\[
+\text{Speed Ratio}=
+\frac{1.34877}{0.148}
+\approx9.11
+\]
+
+For this particular model and implementation, the CPU completes inference approximately 9.1 times faster than the FPGA.
+
+This comparison describes the measured inference latency of this specific workload, not the general performance capabilities of CPUs and FPGAs.
 
 ## Computer-to-FPGA Communication
 
@@ -193,6 +654,7 @@ The FPGA currently achieves approximately 1.35 ms of neural network inference la
 Although the Intel Core Ultra 9 completes this particular small neural network faster, the FPGA demonstrates a functioning, dedicated neural network accelerator implemented entirely in custom hardware.
 
 The performance comparison is specific to this model, FPGA platform, and implementation. It is not a general comparison of CPU and FPGA capabilities.
+
 ## FPGA Resource Utilization
 
 Post-implementation utilization on the Basys 3 (Artix-7 XC7A35T), including the debug IP (ILA and debug hub) used for hardware measurement.
@@ -202,8 +664,8 @@ Post-implementation utilization on the Basys 3 (Artix-7 XC7A35T), including the 
 | Resource | Used | Available | Utilization |
 |---|---:|---:|---:|
 | Slice LUTs | 6,263 | 20,800 | 30.1% |
-| &nbsp;&nbsp;LUT as Logic | 6,109 | 20,800 | 29.4% |
-| &nbsp;&nbsp;LUT as Memory | 154 | 9,600 | 1.6% |
+| LUT as Logic | 6,109 | 20,800 | 29.4% |
+| LUT as Memory | 154 | 9,600 | 1.6% |
 | Slice Registers | 7,487 | 41,600 | 18.0% |
 | F7 Muxes | 233 | 16,300 | 1.4% |
 | Slices | 3,306 | 8,150 | 40.6% |
@@ -219,9 +681,9 @@ Post-implementation utilization on the Basys 3 (Artix-7 XC7A35T), including the 
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `uart_tpu_system` (total) | 6,263 | 7,487 | 233 | 3,306 | 6,109 | 154 | 40.5 | 74 |
 | `tpu` (`tpu_top`) | 4,918 | 5,226 | 230 | 2,636 | 4,912 | 6 | 39 | 74 |
-| &nbsp;&nbsp;`hidden_layer` | 1,786 | 2,511 | 76 | 1,207 | 1,786 | 0 | 0 | 5 |
-| &nbsp;&nbsp;`output_layer` | 1,894 | 1,983 | 154 | 1,127 | 1,894 | 0 | 0 | 5 |
-| &nbsp;&nbsp;`shared_tile_controller` | 1,173 | 619 | 0 | 475 | 1,173 | 0 | 0 | 64 |
+| `hidden_layer` | 1,786 | 2,511 | 76 | 1,207 | 1,786 | 0 | 0 | 5 |
+| `output_layer` | 1,894 | 1,983 | 154 | 1,127 | 1,894 | 0 | 0 | 5 |
+| `shared_tile_controller` | 1,173 | 619 | 0 | 475 | 1,173 | 0 | 0 | 64 |
 | `ila_debug` (`ila_tpu_debug`) | 816 | 1,428 | 3 | 416 | 692 | 124 | 1.5 | 0 |
 | `dbg_hub` | 448 | 741 | 0 | 234 | 424 | 24 | 0 | 0 |
 | `controller` (`uart_tpu_controller`) | 26 | 41 | 0 | 17 | 26 | 0 | 0 | 0 |
@@ -303,13 +765,38 @@ riscv-tpu-accelerator/
 
 ## Future Work
 
-Potential directions for future development include:
+The next major development goal is to integrate the existing custom RV32I processor with the neural network accelerator.
 
-- Improve timing closure and maximum operating frequency.
-- Explore more efficient systolic array architectures.
-- Investigate alternative memory architectures and data movement.
-- Explore integration with the custom RISC-V processor.
-- Experiment with larger neural networks and additional hardware acceleration workloads.
+Rather than having the computer directly control TPU inference over UART, the processor will become the system's central controller.
+
+Planned architecture:
+
+1. **RISC-V CPU Integration**
+   - Integrate the RV32I processor and TPU into a unified FPGA system.
+   - Keep the CPU and accelerator as separate hardware modules.
+
+2. **Memory-Mapped TPU Interface**
+   - Implement control and status registers.
+   - Allow the CPU to configure the accelerator, provide input data, start inference, and retrieve results.
+   - Allow the TPU to execute independently while the CPU performs other work.
+
+3. **Programmable Accelerator**
+   - Introduce configurable operation and layer descriptors.
+   - Move away from a controller designed specifically for the current 784 → 128 → 32 network.
+   - Support configurable dimensions, memory addresses, and operation types.
+
+4. **Multiple Neural Network Architectures**
+   - Support different dense-layer configurations.
+   - Introduce convolution operations for CNN workloads.
+   - Explore pooling, additional activation functions, and other neural network operations.
+   - Investigate transformer-related operations where hardware resources permit.
+
+5. **System-Level Optimization**
+   - Improve memory management and data movement between the CPU and TPU.
+   - Explore instruction-driven accelerator control.
+   - Optimize resource utilization and timing closure.
+
+The long-term goal is to build a programmable RISC-V-based computing system with a dedicated neural network accelerator capable of executing multiple types of neural network workloads.
 
 ## Project Status
 
@@ -319,4 +806,4 @@ The hardware has been tested using the Python application, benchmarked against l
 
 The eight-bank weight memory architecture reduces tile-loading cycles by 4.5× compared with the original sequential loading approach.
 
-This establishes a working baseline for future TPU architectural experiments and optimization.
+This establishes a working baseline for integrating the accelerator with the custom RISC-V processor and developing a more general-purpose neural network accelerator.
