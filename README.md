@@ -193,6 +193,41 @@ The FPGA currently achieves approximately 1.35 ms of neural network inference la
 Although the Intel Core Ultra 9 completes this particular small neural network faster, the FPGA demonstrates a functioning, dedicated neural network accelerator implemented entirely in custom hardware.
 
 The performance comparison is specific to this model, FPGA platform, and implementation. It is not a general comparison of CPU and FPGA capabilities.
+## FPGA Resource Utilization
+
+Post-implementation utilization on the Basys 3 (Artix-7 XC7A35T), including the debug IP (ILA and debug hub) used for hardware measurement.
+
+### Total Utilization
+
+| Resource | Used | Available | Utilization |
+|---|---:|---:|---:|
+| Slice LUTs | 6,263 | 20,800 | 30.1% |
+| &nbsp;&nbsp;LUT as Logic | 6,109 | 20,800 | 29.4% |
+| &nbsp;&nbsp;LUT as Memory | 154 | 9,600 | 1.6% |
+| Slice Registers | 7,487 | 41,600 | 18.0% |
+| F7 Muxes | 233 | 16,300 | 1.4% |
+| Slices | 3,306 | 8,150 | 40.6% |
+| Block RAM Tiles | 40.5 | 50 | 81.0% |
+| DSPs | 74 | 90 | 82.2% |
+| Bonded IOB | 13 | 106 | 12.3% |
+| BUFGCTRL | 2 | 32 | 6.3% |
+| BSCANE2 | 1 | 4 | 25.0% |
+
+### Utilization by Module
+
+| Module | Slice LUTs | Slice Registers | F7 Muxes | Slices | LUT as Logic | LUT as Memory | BRAM Tiles | DSPs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `uart_tpu_system` (total) | 6,263 | 7,487 | 233 | 3,306 | 6,109 | 154 | 40.5 | 74 |
+| `tpu` (`tpu_top`) | 4,918 | 5,226 | 230 | 2,636 | 4,912 | 6 | 39 | 74 |
+| &nbsp;&nbsp;`hidden_layer` | 1,786 | 2,511 | 76 | 1,207 | 1,786 | 0 | 0 | 5 |
+| &nbsp;&nbsp;`output_layer` | 1,894 | 1,983 | 154 | 1,127 | 1,894 | 0 | 0 | 5 |
+| &nbsp;&nbsp;`shared_tile_controller` | 1,173 | 619 | 0 | 475 | 1,173 | 0 | 0 | 64 |
+| `ila_debug` (`ila_tpu_debug`) | 816 | 1,428 | 3 | 416 | 692 | 124 | 1.5 | 0 |
+| `dbg_hub` | 448 | 741 | 0 | 234 | 424 | 24 | 0 | 0 |
+| `controller` (`uart_tpu_controller`) | 26 | 41 | 0 | 17 | 26 | 0 | 0 | 0 |
+| `uart_receiver` (`uart_rx`) | 35 | 32 | 0 | 13 | 35 | 0 | 0 | 0 |
+
+The `tpu` rows include its submodules, so they are not additive with the parent row. The ILA and debug hub add about 1,264 LUTs and 1.5 BRAM tiles, and would not be needed in a release build.
 
 ## FPGA Configuration and Flash Programming
 
