@@ -496,45 +496,6 @@ $$
 
 This is the theoretical serial transfer time for the complete request and response, excluding additional host and USB-UART overhead.
 
-### 13. FPGA Inference Latency
-
-The FPGA operates with a 100 MHz clock.
-
-The clock period is:
-
-$$
-T_{\text{clock}} = \frac{1}{f_{\text{clock}}} = \frac{1}{100{,}000{,}000} = 10 \text{ ns}
-$$
-
-Inference latency is calculated from the measured cycle count:
-
-$$
-t_{\text{inference}} = \frac{C_{\text{inference}}}{f_{\text{clock}}}
-$$
-
-For the measured 134,877 cycles:
-
-$$
-t_{\text{inference}} = \frac{134{,}877}{100{,}000{,}000} = 1.34877 \text{ ms}
-$$
-
-### 14. CPU-to-FPGA Performance Comparison
-
-The relative speed ratio is calculated using:
-
-$$
-\text{Speed ratio} = \frac{t_{\text{slower}}}{t_{\text{faster}}}
-$$
-
-Using the measured CPU and FPGA inference times:
-
-$$
-\text{Speed ratio} = \frac{1.34877 \text{ ms}}{0.148 \text{ ms}} = 9.11
-$$
-
-For this particular model and implementation, the CPU completes inference approximately 9.1 times faster than the FPGA.
-
-This comparison describes the measured inference latency of this specific workload, not the general performance capabilities of CPUs and FPGAs.
 
 ## Computer-to-FPGA Communication
 
